@@ -1,0 +1,19 @@
+# Virtual environment
+venv/
+
+# Data - too large, not original work, and downloadable via the documented pipeline
+data/raw/
+data/processed/
+
+# macOS junk
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Failed/incomplete run artifacts (if any new ones appear later)
+src/models/runs/classify/train/
+smoke_test/
+src/models/yolo11n-cls.pt
+models/baseline_unweighted_last.pt
