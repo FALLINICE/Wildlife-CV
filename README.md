@@ -5,8 +5,7 @@ imagery and generating grounded, RAG-based ecological context for each
 detection. Built on field data from LILA BC's **Desert Lion Conservation
 Camera Traps** dataset (Northern Namibia).
 
-**Status:** Week 2 (classification model) complete through Day 15
-(final test-set evaluation). Day 16 (cleanup) and Weeks 3-8 (serving, RAG,
+**Status:** Week 3 (FastAPI serving) complete. Weeks 4-8 (RAG, evaluation,
 reporting, deployment) pending.
 
 ---
@@ -19,10 +18,11 @@ reviewed. This project builds a system that:
 
 1. **Classifies** the species in a camera-trap image
 2. **Routes** low-confidence predictions to human review instead of
-   forcing a guess
-3. Will **ground** detections in real ecological/conservation context via
+   forcing a guess, surfacing alternative candidates when it does
+3. **Serves** predictions via a documented, tested REST API
+4. Will **ground** detections in real ecological/conservation context via
    RAG (Weeks 4-5, not yet built)
-4. Is evaluated throughout on real, honestly-reported numbers — including
+5. Is evaluated throughout on real, honestly-reported numbers — including
    where it struggles, not just where it succeeds
 
 ---
@@ -246,7 +246,122 @@ this is a real, consistent model behavior rather than a one-off.
 
 ---
 
-## 8. Known Limitations
+## 8. FastAPI Serving Layer (Week 3)
+
+### 8.1 Overview
+The trained baseline classifier is served via a FastAPI REST API with a
+single primary endpoint, `POST /predict`, which accepts an image upload
+and returns a species classification with confidence-based review routing.
+
+### 8.2 Endpoint: `POST /predict`
+
+**Request:** multipart/form-data upload, field name `file`. Accepted types:
+JPEG, JPG, PNG. Max size: 10MB.
+
+**Response (confident prediction):**
+```json
+{
+  "species": "struthio_camelus",
+  "confidence": 0.9997,
+  "review_needed": false
+}
+```
+
+**Response (low-confidence prediction):** when `confidence` falls below
+the locked-in threshold (0.85, see Section 6), the response additionally
+includes up to 3 ranked alternative candidates, giving a human reviewer a
+head start rather than just an unqualified "uncertain":
+```json
+{
+  "species": "struthio_camelus",
+  "confidence": 0.6286,
+  "review_needed": true,
+  "alternative_candidates": [
+    {"species": "struthio_camelus", "confidence": 0.6286},
+    {"species": "antidorcas_marsupialis", "confidence": 0.1531},
+    {"species": "giraffa_camelopardalis", "confidence": 0.0904}
+  ]
+}
+```
+
+**Design rationale:** `alternative_candidates` is included conditionally,
+not on every response. An always-on top-3 output would introduce noise on
+confident predictions where a single clean answer is already reliable;
+surfacing alternatives specifically when `review_needed` is true targets
+exactly the cases where a human reviewer benefits from a head start,
+leveraging the model's known top-5 accuracy of 99.7% (vs. 94.8% top-1) —
+when the top guess is wrong, the correct answer is very often still among
+the next few.
+
+### 8.3 Error Handling
+
+| Condition | Status | Response |
+|---|---|---|
+| Invalid file type (not JPEG/PNG) | 400 | `"Invalid file type: {type}. Only JPEG, JPG, PNG format accepted."` |
+| Empty file (0 bytes) | 400 | `"Uploaded file is empty."` |
+| File exceeds 10MB | 400 | `"File too large. Max size is 10MB."` |
+| Corrupted/unreadable image | 422 | `"Could not process image. The file may be corrupted or unreadable."` |
+
+All uploaded files are written to a temporary directory with a randomly
+generated filename (UUID-based, not the user-supplied filename, to avoid
+path-traversal and filename-collision risks) and are deleted after
+processing via a `try/finally` block — verified to execute cleanup on both
+success and failure paths, including when prediction itself fails midway.
+
+### 8.4 Automated Test Suite
+
+Six tests in `tests/test_api.py`, using FastAPI's `TestClient`:
+1. `/docs` loads successfully
+2. Valid image → correct response shape and value ranges
+3. Invalid file type → 400, correct error message
+4. Empty file → 400, correct error message
+5. Corrupted image (the same file identified as unreadable throughout
+   Week 2's evaluation) → 422, no server crash
+6. Low-confidence prediction → conditionally includes exactly 3 distinct
+   alternative candidates; confident prediction → field absent entirely
+
+All 6 tests pass. Test data reuses the project's real train/val/test
+imagery rather than synthetic stand-ins, so the suite exercises the actual
+model and actual data-quality issues (e.g., the known corrupted file) the
+project has already characterized.
+
+### 8.5 Logging
+
+Requests are logged via Python's `logging` module (not `print()`, to
+support severity filtering): successful predictions at `INFO` (species,
+confidence, review flag), validation rejections (wrong type, empty,
+oversized) at `WARNING`, and genuine prediction failures (corrupted/
+unreadable images) at `ERROR`.
+
+### 8.6 Out-of-Distribution Behavior — An Informal but Important Finding
+
+The classifier is a **closed-set** model — it can only choose among its
+10 trained species and has no built-in mechanism to express "none of
+these." Informal testing with genuinely out-of-distribution animals
+(not among the 10 trained classes) surfaced inconsistent behavior worth
+documenting honestly:
+
+- **Striped hyena** (not a trained class) → classified as `hyaena_brunnea`
+  (brown hyena) at 55.8% confidence, correctly flagged for review. The
+  second-ranked alternative was `equus_zebra_hartmannae` (zebra) at 43.2%
+  — an interpretable confusion, plausibly driven by both animals sharing
+  a prominent striped coat pattern.
+- **Spotted hyena** (also not a trained class) → confidently (91.2%)
+  misclassified as `giraffa_camelopardalis` (giraffe), and **not** flagged
+  for review, despite being an equally out-of-distribution input.
+
+This is a concrete demonstration of a well-known limitation of softmax-
+based closed-set classifiers: confidence scores are not a reliable
+calibrated measure of "is this actually one of my known classes," only of
+"how sure am I about my top choice among the classes I know." The system
+sometimes expresses appropriate uncertainty on novel inputs and sometimes
+does not. A more robust future iteration could incorporate explicit
+open-set recognition or out-of-distribution detection, rather than relying
+solely on softmax confidence.
+
+---
+
+## 9. Known Limitations
 
 - **Jackal remains the weakest class** even after confidence routing;
   a single global threshold does not fully compensate. A species-specific
@@ -259,10 +374,19 @@ this is a real, consistent model behavior rather than a one-off.
   filename collisions (Section 2).
 - Confidence scores are uncalibrated softmax outputs, not true
   probabilities — a small number of confident errors persist.
+- **The classifier has no out-of-distribution detection** — genuinely
+  novel species can produce confidently wrong, unflagged predictions
+  (Section 8.6). This is the most significant limitation surfaced during
+  Week 3 and a strong candidate for future work.
+- The file-size validation reads the full upload into memory before
+  checking its size, rather than inspecting `Content-Length` beforehand —
+  an accepted simplification for a project at this scale, not a
+  production-grade safeguard against memory exhaustion from oversized
+  uploads.
 
 ---
 
-## 9. Project Structure
+## 10. Project Structure
 
 ```
 wildlife-cv-rag/
@@ -270,7 +394,7 @@ wildlife-cv-rag/
 │   ├── raw/images/<species>/*.JPG
 │   └── processed/{train,val,test}/<species>/*.JPG
 ├── notebooks/
-│   └── 01_metadata_exploration.ipynb
+│   └── wildlife_metadata.ipynb
 ├── src/
 │   ├── data/
 │   │   ├── download_images.py
@@ -279,8 +403,11 @@ wildlife-cv-rag/
 │   │   ├── train.py                    # baseline
 │   │   ├── weighted_sampler.py          # custom WeightedRandomSampler trainer
 │   │   └── train_weighted.py
-│   ├── rag/              (Weeks 4-5, pending)
-│   └── api/                (Week 3, pending)
+│   ├── api/
+│   │   └── app.py                       # Week 3: FastAPI serving
+│   └── rag/              (Weeks 4-5, pending)
+├── tests/
+│   └── test_api.py                       # Week 3: 6-test suite
 ├── eval/
 │   ├── compare_baseline_vs_weighted.py  # Day 13, McNemar's test
 │   ├── confidence_threshold.py           # Day 14, validation-based
@@ -293,13 +420,14 @@ wildlife-cv-rag/
 ├── models/
 │   ├── baseline_unweighted.pt
 │   └── weighted_sampling.pt
+├── pytest.ini
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 10. Setup
+## 11. Setup
 
 ```bash
 python3 -m venv venv
@@ -307,9 +435,20 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**Run the API:**
+```bash
+uvicorn src.api.app:app --reload --port 8000
+```
+Interactive docs: `http://localhost:8000/docs`
+
+**Run tests:**
+```bash
+pytest tests/test_api.py -v
+```
+
 ---
 
-## 11. Roadmap
+## 12. Roadmap
 
 - [x] **Week 1** — Data collection, species selection, download pipeline
 - [x] **Day 8** — Train/val/test split (70/15/15, stratified; corruption bug caught and fixed)
@@ -320,8 +459,13 @@ pip install -r requirements.txt
 - [x] **Day 13** — Baseline vs. weighted comparison, McNemar's test (p=0.635, no significant difference)
 - [x] **Day 14** — Confidence threshold selected (0.85), per-species and overconfidence analysis added
 - [x] **Day 15** — Final test-set evaluation (98.36% trusted accuracy, findings replicated)
-- [ ] **Day 16** — Buffer / cleanup
-- [ ] **Week 3** — FastAPI serving with confidence-based routing
+- [x] **Day 16** — Buffer / cleanup
+- [x] **Day 17** — FastAPI endpoint skeleton, model loading via `lifespan`
+- [x] **Day 18** — Confidence + review-flag logic, conditional top-3 alternatives
+- [x] **Day 19** — Full input validation and error handling
+- [x] **Day 20** — 6-test automated suite (pytest + TestClient)
+- [x] **Day 21** — Logging, endpoint documentation
+- [x] **Day 22** — Final manual pass, README update, out-of-distribution findings documented
 - [ ] **Week 4-5** — RAG knowledge base + grounded reasoning layer
 - [ ] **Week 6** — Full evaluation set + retrieval-relevance reporting
 - [ ] **Week 7** — Report-generation agent
