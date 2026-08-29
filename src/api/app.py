@@ -7,10 +7,12 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from ultralytics import YOLO
 from typing import Annotated
+from src.rag.retrieval import get_species_knowledge
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MODEL_PATH = PROJECT_ROOT / "src" / "models" / "runs" / "classify" / "train-5" / "weights" / "best.pt"
 UPLOAD_DIR = PROJECT_ROOT / "uploaded_images"
+DATA_PATH = PROJECT_ROOT / "data"
 
 
 # Confidence threshold below which a prediction is flagged for human review.
@@ -113,10 +115,16 @@ async def predict_class(file: Annotated[UploadFile, File()]):
         confidence = result.probs.top1conf.item()
         review_needed = confidence < CONFIDENCE_THRESHOLD
 
+        species_info = get_species_knowledge(predicted_label)
+        if species_info is None:
+            logging.warning(f"No knowledge document found for predicted species: {predicted_label}")
+
+
         response = {
             "species": predicted_label,
             "confidence": round(confidence, 4),
             "review_needed": review_needed,
+            "description": species_info
         }
 
         logging.info(f"Prediction: {predicted_label} (confidence={confidence:.4f}, review_needed={review_needed})")
@@ -125,8 +133,9 @@ async def predict_class(file: Annotated[UploadFile, File()]):
             probs_tensor = result.probs.data
             top3_indices = torch.topk(probs_tensor, k=3).indices.tolist()
             response["alternative_candidates"] = [
-                {"species": result.names[i], "confidence": round(probs_tensor[i].item(), 4)}
-                for i in top3_indices
+                {"species": result.names[i], 
+                 "confidence": round(probs_tensor[i].item(), 4),
+                }for i in top3_indices
             ]
 
         return response

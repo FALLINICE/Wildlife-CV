@@ -5,8 +5,9 @@ imagery and generating grounded, RAG-based ecological context for each
 detection. Built on field data from LILA BC's **Desert Lion Conservation
 Camera Traps** dataset (Northern Namibia).
 
-**Status:** Week 3 (FastAPI serving) complete. Weeks 4-8 (RAG, evaluation,
-reporting, deployment) pending.
+**Status:** Week 4 (RAG knowledge base + retrieval) complete. Week 5
+(grounded LLM reasoning layer) and Weeks 6-8 (evaluation, reporting,
+deployment) pending.
 
 ---
 
@@ -20,8 +21,9 @@ reviewed. This project builds a system that:
 2. **Routes** low-confidence predictions to human review instead of
    forcing a guess, surfacing alternative candidates when it does
 3. **Serves** predictions via a documented, tested REST API
-4. Will **ground** detections in real ecological/conservation context via
-   RAG (Weeks 4-5, not yet built)
+4. **Grounds** detections in real ecological/conservation context via a
+   retrieval-augmented (RAG) knowledge base — retrieval built and
+   validated in Week 4; LLM-generated grounded explanations in Week 5
 5. Is evaluated throughout on real, honestly-reported numbers — including
    where it struggles, not just where it succeeds
 
@@ -59,8 +61,8 @@ counts are still ample.
 
 **Species selection rationale:** black rhino's inclusion is deliberate
 beyond its image count — as a critically endangered species, it gives the
-planned RAG/reasoning layer a genuinely meaningful conservation-status
-case to reason about.
+RAG/reasoning layer a genuinely meaningful conservation-status case to
+reason about (see Section 9).
 
 **Imbalance-handling decision:** rather than force equal sampling
 (which was tested and found to collapse nearly all natural imbalance at a
@@ -78,6 +80,11 @@ model level) used in a separate project, AthNext.
   all observed cases
 - A small number of images (1 in validation) are entirely unreadable and
   excluded from evaluation
+- The species folder name `loxodanta_africana` is a pre-existing typo
+  inherited from the source dataset's labeling (correct scientific spelling
+  is *Loxodonta africana*); kept as-is throughout the project for
+  consistency with folder names, classifier classes, and knowledge base
+  document IDs, but noted here for accuracy
 
 ---
 
@@ -310,20 +317,24 @@ success and failure paths, including when prediction itself fails midway.
 
 ### 8.4 Automated Test Suite
 
-Six tests in `tests/test_api.py`, using FastAPI's `TestClient`:
+Tests in `tests/test_api.py`, using FastAPI's `TestClient`:
 1. `/docs` loads successfully
-2. Valid image → correct response shape and value ranges
+2. Valid image → correct response shape and value ranges, including the
+   RAG-retrieved `description` field (see Section 9)
 3. Invalid file type → 400, correct error message
 4. Empty file → 400, correct error message
 5. Corrupted image (the same file identified as unreadable throughout
    Week 2's evaluation) → 422, no server crash
 6. Low-confidence prediction → conditionally includes exactly 3 distinct
    alternative candidates; confident prediction → field absent entirely
+7. Black rhino prediction → returned `description` correctly contains
+   "Critically Endangered," verifying retrieval returns the *correct*
+   document, not just *a* document
 
-All 6 tests pass. Test data reuses the project's real train/val/test
+All tests pass. Test data reuses the project's real train/val/test
 imagery rather than synthetic stand-ins, so the suite exercises the actual
-model and actual data-quality issues (e.g., the known corrupted file) the
-project has already characterized.
+model, the actual knowledge base, and actual data-quality issues (e.g.,
+the known corrupted file) the project has already characterized.
 
 ### 8.5 Logging
 
@@ -361,7 +372,110 @@ solely on softmax confidence.
 
 ---
 
-## 9. Known Limitations
+## 9. RAG Knowledge Base & Retrieval (Week 4)
+
+### 9.1 Overview
+A retrieval-augmented knowledge layer grounds each detection in real
+ecological and conservation facts, sourced from a hand-curated corpus
+rather than free-form model generation. Week 4 covers the knowledge base
+and retrieval mechanism; Week 5 will add an LLM layer that uses this
+retrieved text to generate a natural-language grounded explanation.
+
+### 9.2 Knowledge Corpus
+Ten markdown documents (`data/knowledge/`), one per trained species, each
+following a consistent structure: Conservation Status (IUCN Red List
+category), Habitat, Behaviour, Diet, Ecological Importance, Major Threats,
+an Interesting Fact, and cited Sources (IUCN Red List, WWF, Smithsonian's
+National Zoo, San Diego Zoo Wildlife Alliance, Animal Diversity Web,
+National Geographic).
+
+IUCN statuses genuinely vary across the corpus — not a placeholder value
+repeated across documents — which is what makes conservation-status
+reasoning meaningful rather than decorative:
+
+| Status | Species |
+|---|---|
+| Critically Endangered | Black rhino |
+| Endangered | Elephant |
+| Vulnerable | Giraffe, Lion, Hartmann's mountain zebra |
+| Near Threatened | Brown hyena |
+| Least Concern | Springbok, Jackal, Gemsbok, Ostrich |
+
+### 9.3 Vector Store: ChromaDB
+**Choice rationale:** ChromaDB was selected over FAISS because it provides
+a complete, high-level document-store-and-query API with automatic
+embedding generation (via a bundled `all-MiniLM-L6-v2` sentence-transformer
+model), whereas FAISS is a lower-level similarity-search library requiring
+manual embedding and document management — unnecessary complexity for a
+10-document knowledge base at this scale. A persistent, on-disk client
+(`data/vector_store/`) is used rather than Chroma's in-memory default,
+confirmed via an explicit test (adding a document in one process, querying
+it successfully in a separate later process) to survive across sessions.
+
+### 9.4 Retrieval Validation
+Retrieval quality was tested two ways:
+
+**Species-specific semantic queries (10/10 correct):** one natural-language
+query per species (e.g., "What is the conservation status of the black
+rhino?", "How fast can an ostrich run?"), confirming the correct document
+ranks first by embedding distance in every case — verifying retrieval
+works on semantic meaning, not just keyword overlap (queries used varied
+phrasing that often shared few or no exact words with the source document).
+
+**A deliberately harder, ambiguous query — a genuine limitation found:**
+the query "Which African animals are threatened by poaching?" — a topic
+explicitly mentioned in both the black rhino and elephant documents —
+failed to return either as a top-3 result; ostrich, brown hyena, and
+jackal ranked higher instead, despite poaching not being a listed threat
+for any of them. This reflects a real weakness of single-chunk-per-document
+embedding for cross-document topic queries, where each document's overall
+semantic content (habitat, diet, behavior) can outweigh a single relevant
+sentence buried in a threats list.
+
+**Why this limitation was accepted rather than fixed now:** the production
+retrieval path (Section 9.5) never performs open-ended semantic search —
+it looks up a document by the classifier's exact predicted species ID,
+which cannot suffer from this failure mode. Fixing cross-topic query
+quality (e.g., via finer-grained document chunking) is noted as a future
+improvement rather than implemented now, since it would not affect the
+system's actual behavior as currently used.
+
+### 9.5 Integration: Direct ID Lookup, Not Semantic Search
+The `/predict` endpoint's classifier output already provides the exact
+predicted species identity — there is no ambiguity to resolve, unlike a
+free-form user question. Retrieval is therefore implemented as a direct
+ID lookup (`collection.get(ids=[...])`), not a semantic `.query()` call:
+a simpler, faster, and unambiguous operation that is immune to the
+cross-topic weakness described above.
+
+`GET /predict` responses now include a `description` field containing the
+full retrieved knowledge document for the predicted species:
+```json
+{
+  "species": "canis_mesomelas",
+  "confidence": 0.9164,
+  "review_needed": false,
+  "description": "# Canis mesomelas\n\n**Common Name:** Black-backed Jackal\n..."
+}
+```
+
+**Design decision — full document, not a trimmed excerpt:** the complete
+document is returned rather than a short summary, since this raw retrieval
+output is intended to feed Week 5's LLM reasoning layer, which requires
+full context (habitat, behavior, threats — not just conservation status)
+to generate a genuinely grounded explanation. Trimming here would remove
+information the generation step needs; a future human-facing summary view
+remains a reasonable addition once generation exists.
+
+**Defensive handling:** retrieval returns `None` (logged as a warning,
+not a silent failure) if a predicted species has no matching document —
+a condition that should never occur given all 10 trained classes have a
+corresponding document, but handled explicitly in case the classifier's
+class list and the knowledge base's document IDs ever fall out of sync.
+
+---
+
+## 10. Known Limitations
 
 - **Jackal remains the weakest class** even after confidence routing;
   a single global threshold does not fully compensate. A species-specific
@@ -383,16 +497,23 @@ solely on softmax confidence.
   an accepted simplification for a project at this scale, not a
   production-grade safeguard against memory exhaustion from oversized
   uploads.
+- **Semantic (query-based) retrieval degrades on cross-document topic
+  questions** (Section 9.4) — accepted as out of scope since production
+  retrieval uses direct ID lookup, not semantic search, but would need
+  addressing (e.g., finer document chunking) before any future feature
+  relies on open-ended knowledge-base search.
 
 ---
 
-## 10. Project Structure
+## 11. Project Structure
 
 ```
 wildlife-cv-rag/
 ├── data/
 │   ├── raw/images/<species>/*.JPG
-│   └── processed/{train,val,test}/<species>/*.JPG
+│   ├── processed/{train,val,test}/<species>/*.JPG
+│   ├── knowledge/<species>.md              # Week 4: species knowledge corpus
+│   └── vector_store/                        # Week 4: persistent ChromaDB store
 ├── notebooks/
 │   └── wildlife_metadata.ipynb
 ├── src/
@@ -404,10 +525,12 @@ wildlife-cv-rag/
 │   │   ├── weighted_sampler.py          # custom WeightedRandomSampler trainer
 │   │   └── train_weighted.py
 │   ├── api/
-│   │   └── app.py                       # Week 3: FastAPI serving
-│   └── rag/              (Weeks 4-5, pending)
+│   │   └── app.py                       # Week 3: FastAPI serving; Week 4: RAG-integrated
+│   └── rag/
+│       ├── knowledge_base.py             # Week 4: corpus loading + embedding
+│       └── retrieval.py                  # Week 4: direct ID lookup helper
 ├── tests/
-│   └── test_api.py                       # Week 3: 6-test suite
+│   └── test_api.py                       # Week 3-4: test suite
 ├── eval/
 │   ├── compare_baseline_vs_weighted.py  # Day 13, McNemar's test
 │   ├── confidence_threshold.py           # Day 14, validation-based
@@ -427,7 +550,7 @@ wildlife-cv-rag/
 
 ---
 
-## 11. Setup
+## 12. Setup
 
 ```bash
 python3 -m venv venv
@@ -446,9 +569,14 @@ Interactive docs: `http://localhost:8000/docs`
 pytest tests/test_api.py -v
 ```
 
+**Rebuild the knowledge base** (if `data/knowledge/*.md` files change):
+```bash
+python src/rag/knowledge_base.py
+```
+
 ---
 
-## 12. Roadmap
+## 13. Roadmap
 
 - [x] **Week 1** — Data collection, species selection, download pipeline
 - [x] **Day 8** — Train/val/test split (70/15/15, stratified; corruption bug caught and fixed)
@@ -463,10 +591,11 @@ pytest tests/test_api.py -v
 - [x] **Day 17** — FastAPI endpoint skeleton, model loading via `lifespan`
 - [x] **Day 18** — Confidence + review-flag logic, conditional top-3 alternatives
 - [x] **Day 19** — Full input validation and error handling
-- [x] **Day 20** — 6-test automated suite (pytest + TestClient)
+- [x] **Day 20** — Automated test suite (pytest + TestClient)
 - [x] **Day 21** — Logging, endpoint documentation
 - [x] **Day 22** — Final manual pass, README update, out-of-distribution findings documented
-- [ ] **Week 4-5** — RAG knowledge base + grounded reasoning layer
+- [x] **Week 4** — Knowledge corpus (10 species), ChromaDB vector store, retrieval validated across all species, integrated into `/predict` via direct ID lookup
+- [ ] **Week 5** — Grounded LLM reasoning layer (retrieved text → generated explanation)
 - [ ] **Week 6** — Full evaluation set + retrieval-relevance reporting
 - [ ] **Week 7** — Report-generation agent
 - [ ] **Week 8** — Frontend + deployment

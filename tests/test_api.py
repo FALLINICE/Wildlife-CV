@@ -40,6 +40,9 @@ def test_valid_pred(client):
     assert "review_needed" in data
     assert 0.0 <= data["confidence"] <= 1.0
     assert isinstance(data["review_needed"], bool)
+    assert "description" in data
+    assert data["description"] is not None
+    assert len(data["description"]) > 0
 
 def test_valid_file(client):
      
@@ -93,3 +96,20 @@ def test_low_confidence_includes_alternatives(client):
         assert len(set(species_list)) == 3  # all three should be different species
     else:
         assert "alternative_candidates" not in data
+
+def test_black_rhino_description_correct(client):
+    rhino_path = PROJECT_ROOT / "data" / "processed" / "test" / "diceros_bicornis"
+    image_files = list(rhino_path.glob("*.JPG"))
+    assert len(image_files) > 0
+
+    sample_image = image_files[0]
+    with open(sample_image, "rb") as f:
+        response = client.post(
+            "/predict",
+            files={"file": (sample_image.name, f, "image/jpeg")}
+        )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["species"] == "diceros_bicornis"
+    assert "Critically Endangered" in data["description"]
