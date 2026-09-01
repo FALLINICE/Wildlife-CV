@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from ultralytics import YOLO
 from typing import Annotated
 from src.rag.retrieval import get_species_knowledge
+from src.rag.generation import generate_explanation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MODEL_PATH = PROJECT_ROOT / "src" / "models" / "runs" / "classify" / "train-5" / "weights" / "best.pt"
@@ -119,13 +120,24 @@ async def predict_class(file: Annotated[UploadFile, File()]):
         if species_info is None:
             logging.warning(f"No knowledge document found for predicted species: {predicted_label}")
 
+        explanation = generate_explanation(
+            species=predicted_label,
+            confidence=confidence,
+            review_needed=review_needed,
+            retrieved_doc=species_info,
+        )
+
 
         response = {
             "species": predicted_label,
             "confidence": round(confidence, 4),
             "review_needed": review_needed,
-            "description": species_info
+            "description": species_info,
+            "explanation": explanation
         }
+
+        if explanation is None:
+            logging.warning(f"Explanation generation unavailable for this request (species={predicted_label})")
 
         logging.info(f"Prediction: {predicted_label} (confidence={confidence:.4f}, review_needed={review_needed})")
 

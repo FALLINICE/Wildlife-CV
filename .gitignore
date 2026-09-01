@@ -19,3 +19,4 @@ smoke_test/
 src/models/yolo11n-cls.pt
 models/baseline_unweighted_last.pt
 data/vector_store/
+.env

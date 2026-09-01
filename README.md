@@ -475,7 +475,29 @@ class list and the knowledge base's document IDs ever fall out of sync.
 
 ---
 
-## 10. Known Limitations
+## 10. Grounded LLM Reasoning Layer (Week 5)
+
+### 10.1 Overview 
+Week 4's retrieved documents are passed through a grounded prompt to Gemini (gemini-3.6-flash), generating a natural-language explanation for each detection. The system is explicitly constrained to use only the retrieved document as source material.
+
+### 10.2 Prompt Design
+The prompt explicitly instructs the model to use only the provided source document, to omit rather than guess when the document doesn't cover something, and to acknowledge uncertainty in its framing when review_needed is true rather than stating the classification as settled fact.
+
+### 10.3 Groundedness Testing 
+13 generated explanations were manually reviewed against their source documents, spanning all 10 trained species and multiple conditions: confident predictions, two genuinely low-confidence cases (one manually set, one from a real classifier output on a real jackal image at 0.53 confidence), and a case with a deliberately thin source document. All 13 were fully grounded — zero fabricated claims found. The model consistently shifted to hedged, conditional language ("potential," "should be treated as uncertain," "if confirmed") when confidence was low, and correctly omitted a specific numeric detail (a stated jump height) that a general-knowledge model might otherwise have invented differently. Notably, the low-confidence jackal test's alternative_candidates reproduced the same jackal↔brown hyena confusion pattern identified in Week 2's confusion matrix — a small but genuine sign of consistency across the system's layers.
+
+### 10.4 Latency 
+Generation latency was variable and significant: observed range 10–85 seconds per request (mean ~30s) across testing. An investigation into disabling the SDK's automatic function-calling (AFC) feature — unused in this project — did not meaningfully reduce latency; this appears to be Gemini Flash's typical response time for prompts of this length on the free tier, not a bottleneck introduced by this project's code. Not optimized further: this is a research tool prioritizing complete, grounded output over response speed, not a latency-sensitive production service.
+
+### 10.5 Rate Limiting & Resilience 
+The free tier enforces a hard limit of 20 requests per period for this model. This was hit organically during testing, producing a google.genai.errors.ClientError (code 429). Generation failures are caught explicitly and return None rather than raising, allowing /predict to still return a successful response with classification and retrieval intact — only explanation is nulled. This was verified against a real, naturally-occurring rate-limit failure, not a simulated one. A lightweight counter logs a warning as usage approaches the limit; 
+a production deployment would need a proper request queue or paid tier, 
+judged out of scope here.
+10.6 Testing Strategy — Most tests mock the generation call to 
+avoid consuming free-tier quota on every run; one dedicated integration 
+test exercises the real Gemini API deliberately.
+
+## 11. Known Limitations
 
 - **Jackal remains the weakest class** even after confidence routing;
   a single global threshold does not fully compensate. A species-specific
@@ -502,10 +524,16 @@ class list and the knowledge base's document IDs ever fall out of sync.
   retrieval uses direct ID lookup, not semantic search, but would need
   addressing (e.g., finer document chunking) before any future feature
   relies on open-ended knowledge-base search.
+- Generation latency (10-85s, mean ~30s) is significant and unoptimized 
+  acceptable for a research tool, not a production service
+- The free tier's 20-request limit is a real, hard operational constraint; 
+  resilience against it is implemented (graceful degradation) but not circumvented
+- Groundedness testing (13 cases) was thorough but manual, not a large-scale 
+  statistical evaluation — Week 6 will formalize this
 
 ---
 
-## 11. Project Structure
+## 12. Project Structure
 
 ```
 wildlife-cv-rag/
@@ -595,7 +623,7 @@ python src/rag/knowledge_base.py
 - [x] **Day 21** — Logging, endpoint documentation
 - [x] **Day 22** — Final manual pass, README update, out-of-distribution findings documented
 - [x] **Week 4** — Knowledge corpus (10 species), ChromaDB vector store, retrieval validated across all species, integrated into `/predict` via direct ID lookup
-- [ ] **Week 5** — Grounded LLM reasoning layer (retrieved text → generated explanation)
+- [x] **Week 5** — Grounded LLM reasoning layer (retrieved text → generated explanation)
 - [ ] **Week 6** — Full evaluation set + retrieval-relevance reporting
 - [ ] **Week 7** — Report-generation agent
 - [ ] **Week 8** — Frontend + deployment

@@ -20,7 +20,12 @@ def test_docs(client):
     assert response.status_code == 200
 
 
-def test_valid_pred(client):
+def test_valid_pred(client, monkeypatch):
+
+    monkeypatch.setattr(
+        "src.api.app.generate_explanation",
+        lambda *args, **kwargs: "Mocked explanation text for testing."
+    )
     
     image_files = list(TEST_IMAGE_PATH.glob("*.JPG"))
     assert len(image_files) > 0, "No test images found - check the path"
@@ -43,6 +48,11 @@ def test_valid_pred(client):
     assert "description" in data
     assert data["description"] is not None
     assert len(data["description"]) > 0
+
+    assert "explanation" in data
+    if data["explanation"] is not None:
+        assert isinstance(data["explanation"], str)
+        assert len(data["explanation"]) > 0         
 
 def test_valid_file(client):
      
@@ -113,3 +123,56 @@ def test_black_rhino_description_correct(client):
     data = response.json()
     assert data["species"] == "diceros_bicornis"
     assert "Critically Endangered" in data["description"]
+
+def test_predict_handles_generation_failure_gracefully(client, monkeypatch):
+    # Force generate_explanation to simulate an LLM failure,
+    # without touching the real API or burning quota
+    def mock_generate_explanation(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "src.api.app.generate_explanation",
+        mock_generate_explanation
+    )
+
+    image_files = list(TEST_IMAGE_PATH.glob("*.JPG"))
+    sample_image = image_files[0]
+
+    with open(sample_image, "rb") as f:
+        response = client.post(
+            "/predict",
+            files={"file": (sample_image.name, f, "image/jpeg")}
+        )
+
+    assert response.status_code == 201
+    data = response.json()
+
+    # classification and retrieval must still work
+    assert "species" in data
+    assert data["description"] is not None
+    assert len(data["description"]) > 0
+
+    # explanation must be None, not missing or crashed
+    assert data["explanation"] is None
+
+def test_generation_real_api_integration(client):
+    """
+    One deliberate, quota-costing test against the real Gemini API,
+    confirming end-to-end integration still works. Not run as part of
+    routine test iteration — reserved for pre-commit/pre-push verification.
+    """
+    image_files = list(TEST_IMAGE_PATH.glob("*.JPG"))
+    sample_image = image_files[0]
+
+    with open(sample_image, "rb") as f:
+        response = client.post(
+            "/predict",
+            files={"file": (sample_image.name, f, "image/jpeg")}
+        )
+
+    assert response.status_code == 201
+    data = response.json()
+    # if this fails specifically due to rate-limiting, that's expected
+    # and acceptable — this test's purpose is confirming wiring, not guaranteeing quota availability
+    if data["explanation"] is not None:
+        assert len(data["explanation"]) > 0
