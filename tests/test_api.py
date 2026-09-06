@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from src.api.app import app
+from src.rag.report import build_report_data, generate_report_narrative
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -176,3 +177,53 @@ def test_generation_real_api_integration(client):
     # and acceptable — this test's purpose is confirming wiring, not guaranteeing quota availability
     if data["explanation"] is not None:
         assert len(data["explanation"]) > 0
+
+def test_build_report_data_counts_correctly():
+    fake_results = [
+        {"predicted_species": "panthera_leo", "review_needed": False},
+        {"predicted_species": "panthera_leo", "review_needed": True},
+        {"predicted_species": "diceros_bicornis", "review_needed": False},
+    ]
+    report = build_report_data(fake_results)
+
+    assert report["total_detections"] == 3
+    assert report["species_counts"]["panthera_leo"] == 2
+    assert report["flagged_count"] == 1
+    assert "diceros_bicornis" in report["conservation_concern_species"]
+
+def test_generate_report_narrative_mocked(monkeypatch):
+    """
+    Confirms generate_report_narrative()'s plumbing (prompt formatting,
+    calling the client, returning the response) works correctly, without
+    hitting the real Gemini API or consuming free-tier quota.
+    """
+
+    class FakeResponse:
+        text = "This is a mocked narrative summarizing the batch."
+
+    class FakeModels:
+        def generate_content(self, model, contents):
+            # confirm the prompt actually contains real data from
+            # report_data, not something malformed or empty
+            assert "total_detections" in contents
+            assert "42" in contents
+            return FakeResponse()
+
+    class FakeClient:
+        models = FakeModels()
+
+    monkeypatch.setattr(
+        "src.rag.report.get_client",
+        lambda: FakeClient()
+    )
+
+    fake_report_data = {
+        "total_detections": 42,
+        "species_counts": {"panthera_leo": 42},
+        "flagged_count": 0,
+        "conservation_concern_species": [],
+    }
+
+    narrative = generate_report_narrative(fake_report_data)
+
+    assert narrative == "This is a mocked narrative summarizing the batch."
