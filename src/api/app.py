@@ -1,6 +1,6 @@
 import os
 import uuid
-#import torch
+import torch
 import logging 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from pathlib import Path
