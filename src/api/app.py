@@ -1,11 +1,11 @@
 import os
 import uuid
-import torch
+#import torch
 import logging 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from pathlib import Path
 from contextlib import asynccontextmanager
-from ultralytics import YOLO
+#from ultralytics import YOLO
 from typing import Annotated
 from src.rag.retrieval import get_species_knowledge
 from src.rag.generation import generate_explanation
@@ -31,13 +31,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        from ultralytics import YOLO
+        _model = YOLO(str(MODEL_PATH))
+    return _model
+
 ml_models = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ml_models["baseline"] = YOLO(str(MODEL_PATH))
+    # ml_models["baseline"] = YOLO(str(MODEL_PATH))
     yield
-    ml_models.clear()
+    # ml_models.clear()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -46,6 +55,8 @@ accepted_format = ["image/jpeg", "image/jpg", "image/png", "image/JPG", "image/J
 
 @app.post("/predict", status_code=status.HTTP_201_CREATED)
 async def predict_class(file: Annotated[UploadFile, File()]):
+
+    
 
     """
     Classify a camera trap image into one of 10 wildlife species.
@@ -91,7 +102,8 @@ async def predict_class(file: Annotated[UploadFile, File()]):
         with open(file_path, "wb") as f:
             f.write(contents)
 
-        model = ml_models["baseline"]
+        # model = ml_models["baseline"]
+        model = get_model()
 
         try:
             prediction = model.predict(file_path, verbose=False)
