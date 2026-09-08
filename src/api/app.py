@@ -3,6 +3,7 @@ import uuid
 import torch
 import logging 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from contextlib import asynccontextmanager
 #from ultralytics import YOLO
@@ -49,6 +50,14 @@ async def lifespan(app: FastAPI):
     # ml_models.clear()
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 accepted_format = ["image/jpeg", "image/jpg", "image/png", "image/JPG", "image/JPEG", "image/PNG"]
 
