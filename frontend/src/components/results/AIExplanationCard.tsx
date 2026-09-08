@@ -40,7 +40,7 @@ export const AIExplanationCard: React.FC<AIExplanationCardProps> = ({ explanatio
           <FormattedMarkdown content={explanation} />
         ) : (
           <p className="text-sm sm:text-base text-nature-300 italic font-sans leading-relaxed">
-            The Gemini LLM reasoning layer synthesized the YOLOv8 vision prediction tensors alongside ChromaDB retrieved document contexts for {speciesName}.
+            The Gemini LLM reasoning layer synthesized the YOLOv11 vision prediction tensors alongside ChromaDB retrieved document contexts for {speciesName}.
           </p>
         )}
       </div>
