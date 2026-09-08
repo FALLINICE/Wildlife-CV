@@ -61,13 +61,13 @@ def generate_explanation(species: str, confidence: float, review_needed: bool, r
 
     except genai_errors.ClientError as e:
         if e.code == 429:
-            logging.error(f"Gemini rate limit exceeded for species={species}: {e}")
+            logging.error(f"Gemini rate limit (429) for species={species}: {e}")
         else:
-            logging.error(f"Gemini API error (code={e.code}) for species={species}: {e}")
+            logging.error(f"Gemini ClientError (code={e.code}) for species={species}: {e}")
         return None
 
     except Exception as e:
-        logging.error(f"Unexpected error during generation for species={species}: {e}")
+        logging.error(f"Gemini unexpected {type(e).__name__} for species={species}: {e}")
         return None
 
 
