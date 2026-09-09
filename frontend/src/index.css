@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: #070D09;
+    color: #F4F6F0;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0F1A13;
+}
+::-webkit-scrollbar-thumb {
+  background: #2A4736;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #385F49;
+}
+
+/* Topographic / Grid Pattern background */
+.bg-nature-grid {
+  background-image: 
+    linear-gradient(to right, rgba(42, 71, 54, 0.12) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(42, 71, 54, 0.12) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Viewfinder corner lines */
+.viewfinder-corner {
+  position: relative;
+}
+.viewfinder-corner::before,
+.viewfinder-corner::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-color: #D4AF37;
+  pointer-events: none;
+}
+
+/* Custom Glassmorphism card */
+.glass-panel {
+  background: rgba(15, 26, 19, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(42, 71, 54, 0.35);
+}
+
+.glass-panel-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.glass-panel-hover:hover {
+  background: rgba(21, 36, 27, 0.95);
+  border-color: rgba(56, 95, 73, 0.6);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.5);
+}
+
+/* Custom animated glow */
+@keyframes glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.animate-glow {
+  animation: glow 4s ease-in-out infinite;
+}
