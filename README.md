@@ -1,629 +1,781 @@
-# Wildlife Camera-Trap Intelligence System
+# Wildlife-CV 🦁
 
-An end-to-end system for classifying wildlife species from real camera-trap
-imagery and generating grounded, RAG-based ecological context for each
-detection. Built on field data from LILA BC's **Desert Lion Conservation
-Camera Traps** dataset (Northern Namibia).
+> **Camera Trap Wildlife Species Classification using YOLO11, Retrieval-Augmented Generation (RAG), and Gemini-powered AI Explanations**
 
-**Status:** Week 4 (RAG knowledge base + retrieval) complete. Week 5
-(grounded LLM reasoning layer) and Weeks 6-8 (evaluation, reporting,
-deployment) pending.
-
----
-
-## 1. Project Overview
-
-Conservation researchers deploy motion-triggered cameras across large field
-sites, generating tens of thousands of images that must be manually
-reviewed. This project builds a system that:
-
-1. **Classifies** the species in a camera-trap image
-2. **Routes** low-confidence predictions to human review instead of
-   forcing a guess, surfacing alternative candidates when it does
-3. **Serves** predictions via a documented, tested REST API
-4. **Grounds** detections in real ecological/conservation context via a
-   retrieval-augmented (RAG) knowledge base — retrieval built and
-   validated in Week 4; LLM-generated grounded explanations in Week 5
-5. Is evaluated throughout on real, honestly-reported numbers — including
-   where it struggles, not just where it succeeds
+[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
+[![YOLO11](https://img.shields.io/badge/YOLO11-Ultralytics-red.svg)](https://docs.ultralytics.com/)
+[![Render](https://img.shields.io/badge/Deployment-Render-46E3B7.svg)](https://render.com/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)]()
 
 ---
 
-## 2. Dataset
+## 🌍 Live Demo
 
-**Source:** [LILA BC](https://lila.science) — Desert Lion Conservation
-Camera Traps, Northern Namibia, COCO Camera Traps annotation format.
+### Frontend
 
-**Species selected (10 of 46 available categories):** the highest-count
-true species (excluding coarse group labels like `cn-raptors`, `aves`,
-etc., which are not species-level).
+**https://wildlife-cv-1.onrender.com**
 
-| Species (scientific name) | Common name | Train | Val | Test | Total |
-|---|---|---|---|---|---|
-| struthio_camelus | Ostrich | 1,337 | 286 | 287 | 1,910 |
-| equus_zebra_hartmannae | Hartmann's mountain zebra | 1,324 | 283 | 285 | 1,892 |
-| oryx_gazella | Oryx/Gemsbok | 1,278 | 273 | 275 | 1,826 |
-| antidorcas_marsupialis | Springbok | 1,214 | 260 | 261 | 1,735 |
-| diceros_bicornis | **Black rhino** | 1,164 | 249 | 251 | 1,664 |
-| panthera_leo | Lion | 1,093 | 234 | 235 | 1,562 |
-| hyaena_brunnea | Brown hyena | 1,078 | 231 | 232 | 1,541 |
-| giraffa_camelopardalis | Giraffe | 889 | 190 | 191 | 1,270 |
-| loxodanta_africana | Elephant | 836 | 179 | 180 | 1,195 |
-| canis_mesomelas | Black-backed jackal | 730 | 156 | 158 | 1,044 |
+### Repository
 
-**Total: 15,639 images** (70/15/15 split, stratified per species).
-
-Original download totaled 18,626 images; ~3,000 were undercounted due to
-camera-trap sequences reusing generic filenames (e.g. `PICT0034.JPG`)
-across different dates, which silently collided with the download
-script's skip-if-exists logic. Not corrected, as remaining per-class
-counts are still ample.
-
-**Species selection rationale:** black rhino's inclusion is deliberate
-beyond its image count — as a critically endangered species, it gives the
-RAG/reasoning layer a genuinely meaningful conservation-status case to
-reason about (see Section 9).
-
-**Imbalance-handling decision:** rather than force equal sampling
-(which was tested and found to collapse nearly all natural imbalance at a
-1,500/species cap), a soft cap of 2,000/species was applied to the 7 most
-common species, while the 3 rarest (lion, jackal, elephant) were kept at
-full natural counts — preserving a real, ~1.4-1.8x imbalance ratio. This
-mirrors the class-weighting philosophy (preserve data, correct at the
-model level) used in a separate project, AthNext.
-
-**Known data quality notes:**
-- ~26% of images carry a placeholder timestamp (`2012:01:01 01:01:01`)
-  rather than a real capture time — not used in any current feature
-- A recurring small number of images per run trigger "Invalid SOS
-  parameters" JPEG warnings; `ultralytics` auto-repairs and continues in
-  all observed cases
-- A small number of images (1 in validation) are entirely unreadable and
-  excluded from evaluation
-- The species folder name `loxodanta_africana` is a pre-existing typo
-  inherited from the source dataset's labeling (correct scientific spelling
-  is *Loxodonta africana*); kept as-is throughout the project for
-  consistency with folder names, classifier classes, and knowledge base
-  document IDs, but noted here for accuracy
+**https://github.com/FALLINICE/Wildlife-CV**
 
 ---
 
-## 3. Data Pipeline
+# Project Overview
 
-1. **Metadata exploration** — COCO Camera Traps JSON (`images`,
-   `annotations`, `categories`) loaded and joined via `pandas`, verifying
-   row counts after each merge (63,468 → 63,468, no drops/duplicates)
-2. **Species/subset selection** — see above
-3. **Image download** — all images downloaded via concurrent HTTP
-   requests (`ThreadPoolExecutor`, 12 workers) with per-image retry logic
-   and skip-if-exists behavior; reduced total download time from a
-   projected 12+ hours (sequential) to ~25 minutes
-4. **Train/val/test split** — stratified 70/15/15, split independently
-   per species. An early version of this script had a critical bug: it
-   didn't clear previous output before re-running, causing the split to
-   silently accumulate across multiple runs (final corrupted state: test
-   set 3.7x larger than intended, at 50% of the data instead of 15%).
-   Caught via a total-row-count sanity check against the known raw image
-   count, root-caused, and fixed by adding an explicit cleanup step at
-   the start of the script. The corrupted-split baseline model (initially
-   trained before the bug was found) was fully discarded and retrained
-   from the corrected split.
+Wildlife conservation projects deploy thousands of motion-triggered camera traps across protected landscapes. These cameras continuously capture wildlife activity, producing **tens of thousands of images** that traditionally require manual inspection by researchers.
 
----
+Manual annotation is slow, expensive, and difficult to scale. Although modern computer vision models can automate species classification, they often provide little insight into *why* a prediction was made and can produce highly confident yet incorrect predictions.
 
-## 4. Classification Model
+Wildlife-CV addresses these challenges by combining modern computer vision with Retrieval-Augmented Generation (RAG) and Large Language Models to produce predictions that are both accurate and interpretable.
 
-**Architecture:** `yolo11n-cls` (YOLO11 nano classification variant),
-fine-tuned via transfer learning from ImageNet-pretrained weights (1.5M
-parameters). Chosen over raw PyTorch/torchvision for its concise training
-API — though this introduced a real limitation (see Section 5).
+The system performs four major tasks:
 
-**Training config:** 30 epochs, batch size 64, image size 224,
-MPS-accelerated (Apple M5), early-stopping patience of 10 (never
-triggered — both runs converged to full 30 epochs).
+- Classifies African wildlife species from camera trap images using a fine-tuned YOLO11 image classification model.
+- Flags low-confidence predictions for human review instead of forcing unreliable classifications.
+- Retrieves verified ecological knowledge about the predicted species using a Retrieval-Augmented Generation (RAG) pipeline.
+- Generates grounded natural-language explanations using Google's Gemini model based only on retrieved documentation.
 
-**Baseline (natural distribution, unweighted) results:**
-- **Best validation top1 accuracy: 94.8%** (converged by epoch 26-30)
-- Per-class recall range: 0.85 (jackal) – 0.98 (elephant) on the initial
-  validation confusion matrix
-- Primary confusion: jackal misclassified as brown hyena — visually
-  explainable, as both are similarly-sized, similarly-colored carnivores
-  that can look alike in low-light or motion-blurred frames
+The application is deployed as a full-stack web application consisting of:
+
+- **FastAPI backend**
+- **React + TypeScript frontend**
+- **YOLO11 classifier**
+- **ChromaDB vector database**
+- **Sentence Transformer embeddings**
+- **Google Gemini API**
 
 ---
 
-## 5. Ablation: Class-Weighted Training
+# Features
 
-**Motivation:** `ultralytics`'s classification training pipeline has no
-built-in per-class loss-weighting argument (unlike, e.g., scikit-learn's
-`class_weight='balanced'`, used in a separate project, AthNext). Rather
-than skip the imbalance question, a custom weighted-sampling mechanism was
-built from scratch: subclassing `ClassificationTrainer.get_dataloader()`
-to inject a `WeightedRandomSampler` (inverse-frequency per-class weights,
-computed from each dataset split's actual sample counts) into the
-*training* dataloader only, leaving validation/test dataloaders
-untouched.
+## Computer Vision
 
-This required reaching into `ultralytics`'s internal source (confirming
-`ClassificationDataset` wraps a `.base` `ImageFolder`-like object rather
-than inheriting from it directly, and that `.samples` entries are 4-tuples
-including caching fields, not the 2-tuples a plain `ImageFolder` returns)
-— genuinely the most technically demanding part of the project to date.
-
-**Weighted model results:**
-- Best validation top1 accuracy: 94.7% — statistically indistinguishable
-  from baseline
-- Jackal recall: 0.85 → 0.87 (small, positive shift)
-- **McNemar's exact test on paired validation predictions: p = 0.635** —
-  no statistically significant difference between baseline and weighted
-  models
-
-**Conclusion:** at this dataset's imbalance ratio (max ~1.8x), class
-weighting did not produce a measurable improvement. Given equivalent
-performance, the simpler unweighted **baseline model was retained** —
-added implementation complexity should be justified by measurable
-benefit, which this ablation did not demonstrate. Jackal's specific
-confusion pattern appears better explained by visual similarity to brown
-hyena than by data scarcity, which reweighting cannot address.
+- Fine-tuned YOLO11 image classification model
+- Supports 10 African wildlife species
+- Confidence score for every prediction
+- Alternative candidate predictions for uncertain classifications
 
 ---
 
-## 6. Confidence-Based Review Routing
+## Human Review Workflow
 
-Since even the strong baseline (94.8% val accuracy) misclassifies roughly
-1 in 20 predictions, a confidence threshold determines which predictions
-are trusted automatically vs. routed for human review.
+Instead of forcing every prediction, Wildlife-CV identifies uncertain classifications using a confidence threshold.
 
-**Method:** validation predictions were split into correct/incorrect
-groups by outcome; their confidence distributions showed real but
-imperfect separation (correct: median 0.9999, IQR 0.998–1.0; incorrect:
-median 0.632, IQR 0.485–0.825).
+Predictions below **0.85 confidence** are automatically marked for human verification.
 
-**Threshold selected: 0.85**, chosen from a full sweep (0.5–0.9) as the
-point where trusted-prediction accuracy gains begin to plateau relative
-to the growing review burden.
+The API returns:
 
-### Validation results (threshold selection basis)
-| Metric | Value |
-|---|---|
-| % flagged for review | 8.7% |
-| Trusted accuracy | 98.88% |
-| Flagged accuracy | 52.5% |
+- prediction confidence
+- review flag
+- top alternative candidate species
 
-### Per-species stress test (added after external review identified this gap)
-A single aggregate accuracy number can mask species-specific weaknesses.
-Breaking down by species revealed **jackal (canis_mesomelas) as a clear
-outlier** — 23.1% of jackal predictions flagged (vs. 4-10% for every other
-species) and only 94.2% trusted accuracy (below the 98.9% aggregate).
-Lion, rhino, and elephant — the other rare/harder species — were *not*
-problems; their trusted accuracy matched or exceeded the aggregate.
-
-### Overconfidence / calibration finding
-12 validation predictions were both wrong and highly confident (≥0.95).
-These skewed toward the model over-predicting majority classes (oryx,
-zebra) — a qualitative sign of residual majority-class bias not visible
-in aggregate accuracy alone. This reflects a well-known property of
-neural network softmax outputs: they are not inherently calibrated
-probabilities of correctness. The classifier exhibits strong confidence
-separation between correct and incorrect predictions overall, though a
-small number of misclassifications remain highly confident — a more
-scientifically precise statement than "the model is confident when
-correct."
+This allows conservation experts to review only uncertain cases instead of every uploaded image.
 
 ---
 
-## 7. Final Test-Set Evaluation (touched once)
+## Retrieval-Augmented Generation (RAG)
 
-All decisions above (model choice, threshold value) were finalized using
-validation data only. The test set was evaluated exactly once, with no
-retuning based on the outcome.
+The project does **not** ask an LLM to generate explanations from memory.
 
-| Metric | Validation | Test |
-|---|---|---|
-| % flagged for review | 8.7% | 9.13% |
-| **Trusted accuracy** | 98.88% | **98.36%** |
-| Flagged accuracy | 52.5% | 58.1% |
+Instead it:
 
-The small, expected drop from validation to test confirms the threshold
-generalizes to unseen data rather than being overfit to the validation
-split.
+1. Retrieves species information from a curated knowledge base.
+2. Supplies only the retrieved document to Gemini.
+3. Produces grounded explanations using retrieved evidence.
 
-**Jackal finding replicated:** jackal remained the lowest-ranked species
-on test (95.56% trusted accuracy, 14.6% flagged) — confirming this is a
-real, reproducible weakness rather than a validation-split artifact.
-The exact magnitude differed between splits, plausibly reflecting real
-sampling variance given jackal's modest size (~156-158 images per split);
-the *direction* of the finding (jackal is the hardest class) was stable
-across both.
-
-**Overconfidence pattern replicated:** 19 high-confidence-wrong cases on
-test (proportionally similar to validation's 12), with the same
-majority-class over-prediction pattern (oryx, zebra, ostrich), confirming
-this is a real, consistent model behavior rather than a one-off.
-
-### Final, honest summary
-> On a held-out test set (2,355 images, evaluated once), the baseline
-> classifier achieved 98.36% trusted-prediction accuracy at a 0.85
-> confidence threshold, closely matching validation performance (98.88%).
-> Species-level analysis, replicated across both splits, identified
-> jackal as the consistently weakest-performing class. High-confidence
-> misclassifications skewed toward over-predicting majority classes on
-> both splits, consistent with the finding that class-weighting produced
-> no statistically significant correction (McNemar's p=0.635).
+This greatly reduces hallucination while ensuring explanations remain relevant to the predicted species.
 
 ---
 
-## 8. FastAPI Serving Layer (Week 3)
+## REST API
 
-### 8.1 Overview
-The trained baseline classifier is served via a FastAPI REST API with a
-single primary endpoint, `POST /predict`, which accepts an image upload
-and returns a species classification with confidence-based review routing.
+A documented FastAPI backend exposes the prediction pipeline through REST endpoints.
 
-### 8.2 Endpoint: `POST /predict`
+The API performs:
 
-**Request:** multipart/form-data upload, field name `file`. Accepted types:
-JPEG, JPG, PNG. Max size: 10MB.
+- image validation
+- inference
+- confidence evaluation
+- retrieval
+- explanation generation
+- structured JSON responses
 
-**Response (confident prediction):**
-```json
-{
-  "species": "struthio_camelus",
-  "confidence": 0.9997,
-  "review_needed": false
-}
+---
+
+## Modern Frontend
+
+The React frontend provides:
+
+- drag-and-drop image upload
+- prediction dashboard
+- confidence visualization
+- human-review indicators
+- species gallery
+- markdown-rendered AI explanations
+- responsive design
+
+---
+
+# Application Workflow
+
+```text
+User Upload
+      │
+      ▼
+YOLO11 Classification
+      │
+      ▼
+Prediction Confidence
+      │
+      ├──────── Confidence ≥ 0.85
+      │
+      │          ▼
+      │   Retrieve Species Knowledge
+      │          ▼
+      │   Gemini Explanation
+      │          ▼
+      │   Display Results
+      │
+      └──────── Confidence < 0.85
+                 │
+                 ▼
+        Flag Human Review
+                 │
+                 ▼
+      Return Alternative Candidates
+                 │
+                 ▼
+         Retrieve Knowledge
+                 │
+                 ▼
+        Gemini Explanation
+                 │
+                 ▼
+           Display Results
 ```
 
-**Response (low-confidence prediction):** when `confidence` falls below
-the locked-in threshold (0.85, see Section 6), the response additionally
-includes up to 3 ranked alternative candidates, giving a human reviewer a
-head start rather than just an unqualified "uncertain":
+---
+
+
+# Dataset
+
+## Source
+
+**LILA BC – Desert Lion Conservation Camera Trap Dataset**
+
+https://lila.science/
+
+The original dataset contains images collected from motion-triggered camera traps deployed across Northern Namibia for wildlife monitoring and conservation research.
+
+---
+
+## Selected Species
+
+This project focuses on the ten most frequently represented true wildlife species in the dataset.
+
+| Scientific Name | Common Name |
+|-----------------|-------------|
+| *Struthio camelus* | Ostrich |
+| *Equus zebra hartmannae* | Hartmann's Mountain Zebra |
+| *Oryx gazella* | Oryx (Gemsbok) |
+| *Antidorcas marsupialis* | Springbok |
+| *Diceros bicornis* | Black Rhino |
+| *Panthera leo* | Lion |
+| *Hyaena brunnea* | Brown Hyena |
+| *Giraffa camelopardalis* | Giraffe |
+| *Loxodonta africana* | African Elephant |
+| *Canis mesomelas* | Black-backed Jackal |
+
+---
+
+## Dataset Statistics
+
+| Split | Images |
+|--------|--------:|
+| Training | 10,943 |
+| Validation | 2,341 |
+| Testing | 2,355 |
+| **Total** | **15,639** |
+
+The dataset was divided using a **70 / 15 / 15 stratified split**, ensuring class proportions were maintained across training, validation, and testing sets.
+
+---
+
+# Model
+
+Wildlife-CV uses **Ultralytics YOLO11 Classification** as the primary image classification model.
+
+Rather than object detection, the project focuses on **whole-image species classification**, making it suitable for camera-trap photographs containing a dominant animal subject.
+
+## Model Highlights
+
+- YOLO11 Classification
+- Transfer Learning
+- Fine-tuned on 15,639 wildlife images
+- PyTorch backend
+- GPU-compatible training
+- Confidence-based prediction output
+- Integrated into a FastAPI inference service
+
+The classifier predicts one of ten supported wildlife species and returns a calibrated confidence score that determines whether the prediction should be trusted automatically or routed for human review.
+
+
+# Retrieval-Augmented Generation (RAG)
+
+Traditional image classifiers return only a class label and confidence score. Wildlife-CV extends this pipeline by providing **grounded ecological explanations** using Retrieval-Augmented Generation (RAG).
+
+Instead of allowing the Large Language Model to generate information from its own knowledge, the system first retrieves verified species documentation and supplies only that context to the model.
+
+This approach improves factual consistency while reducing hallucination.
+
+---
+
+## RAG Pipeline
+
+```text
+Predicted Species
+        │
+        ▼
+Retrieve Species Document
+        │
+        ▼
+Sentence Embedding Search
+        │
+        ▼
+Relevant Context
+        │
+        ▼
+Gemini Prompt Construction
+        │
+        ▼
+Grounded AI Explanation
+```
+
+---
+
+## Knowledge Base
+
+Each supported wildlife species has an associated knowledge document containing ecological and conservation information.
+
+Example topics include:
+
+- scientific classification
+- habitat
+- geographical distribution
+- conservation status
+- ecological behaviour
+- identifying characteristics
+- interesting facts
+
+These documents are embedded using a Sentence Transformer model and indexed inside a ChromaDB vector database.
+
+During inference:
+
+1. the predicted species is used as the retrieval query
+2. the most relevant document is retrieved
+3. the retrieved document becomes the only context supplied to Gemini
+
+---
+
+## Gemini Explanation Generation
+
+Google Gemini is responsible for converting retrieved factual information into a concise explanation suitable for end users.
+
+The model is **not** used to identify species.
+
+Instead, it receives:
+
+- predicted species
+- confidence score
+- review status
+- retrieved knowledge document
+
+and generates a grounded explanation describing:
+
+- why the prediction is reasonable
+- ecological context
+- conservation relevance
+- interpretation of the confidence score
+
+If explanation generation fails, the classification result is still returned, ensuring graceful degradation rather than complete request failure.
+
+---
+
+# Confidence-Based Human Review
+
+Machine learning models inevitably encounter uncertain predictions.
+
+Instead of forcing a potentially incorrect classification, Wildlife-CV identifies low-confidence predictions and flags them for manual verification.
+
+---
+
+## Confidence Threshold
+
+A threshold of **0.85** was selected after validation-set analysis.
+
+Predictions are separated into two categories.
+
+### Confidence ≥ 0.85
+
+- trusted prediction
+- explanation generated
+- returned directly to user
+
+### Confidence < 0.85
+
+- marked for human review
+- alternative candidate species returned
+- confidence warning displayed in UI
+
+This design prioritizes reliability over automation, making the system more suitable for conservation workflows where incorrect classifications may influence ecological analyses.
+
+---
+
+## Alternative Candidate Species
+
+When confidence falls below the review threshold, the API also returns the top candidate species.
+
+Example:
+
 ```json
 {
-  "species": "struthio_camelus",
-  "confidence": 0.6286,
   "review_needed": true,
   "alternative_candidates": [
-    {"species": "struthio_camelus", "confidence": 0.6286},
-    {"species": "antidorcas_marsupialis", "confidence": 0.1531},
-    {"species": "giraffa_camelopardalis", "confidence": 0.0904}
+    {
+      "species": "canis_mesomelas",
+      "confidence": 0.776
+    },
+    {
+      "species": "hyaena_brunnea",
+      "confidence": 0.145
+    },
+    {
+      "species": "panthera_leo",
+      "confidence": 0.061
+    }
   ]
 }
 ```
 
-**Design rationale:** `alternative_candidates` is included conditionally,
-not on every response. An always-on top-3 output would introduce noise on
-confident predictions where a single clean answer is already reliable;
-surfacing alternatives specifically when `review_needed` is true targets
-exactly the cases where a human reviewer benefits from a head start,
-leveraging the model's known top-5 accuracy of 99.7% (vs. 94.8% top-1) —
-when the top guess is wrong, the correct answer is very often still among
-the next few.
-
-### 8.3 Error Handling
-
-| Condition | Status | Response |
-|---|---|---|
-| Invalid file type (not JPEG/PNG) | 400 | `"Invalid file type: {type}. Only JPEG, JPG, PNG format accepted."` |
-| Empty file (0 bytes) | 400 | `"Uploaded file is empty."` |
-| File exceeds 10MB | 400 | `"File too large. Max size is 10MB."` |
-| Corrupted/unreadable image | 422 | `"Could not process image. The file may be corrupted or unreadable."` |
-
-All uploaded files are written to a temporary directory with a randomly
-generated filename (UUID-based, not the user-supplied filename, to avoid
-path-traversal and filename-collision risks) and are deleted after
-processing via a `try/finally` block — verified to execute cleanup on both
-success and failure paths, including when prediction itself fails midway.
-
-### 8.4 Automated Test Suite
-
-Tests in `tests/test_api.py`, using FastAPI's `TestClient`:
-1. `/docs` loads successfully
-2. Valid image → correct response shape and value ranges, including the
-   RAG-retrieved `description` field (see Section 9)
-3. Invalid file type → 400, correct error message
-4. Empty file → 400, correct error message
-5. Corrupted image (the same file identified as unreadable throughout
-   Week 2's evaluation) → 422, no server crash
-6. Low-confidence prediction → conditionally includes exactly 3 distinct
-   alternative candidates; confident prediction → field absent entirely
-7. Black rhino prediction → returned `description` correctly contains
-   "Critically Endangered," verifying retrieval returns the *correct*
-   document, not just *a* document
-
-All tests pass. Test data reuses the project's real train/val/test
-imagery rather than synthetic stand-ins, so the suite exercises the actual
-model, the actual knowledge base, and actual data-quality issues (e.g.,
-the known corrupted file) the project has already characterized.
-
-### 8.5 Logging
-
-Requests are logged via Python's `logging` module (not `print()`, to
-support severity filtering): successful predictions at `INFO` (species,
-confidence, review flag), validation rejections (wrong type, empty,
-oversized) at `WARNING`, and genuine prediction failures (corrupted/
-unreadable images) at `ERROR`.
-
-### 8.6 Out-of-Distribution Behavior — An Informal but Important Finding
-
-The classifier is a **closed-set** model — it can only choose among its
-10 trained species and has no built-in mechanism to express "none of
-these." Informal testing with genuinely out-of-distribution animals
-(not among the 10 trained classes) surfaced inconsistent behavior worth
-documenting honestly:
-
-- **Striped hyena** (not a trained class) → classified as `hyaena_brunnea`
-  (brown hyena) at 55.8% confidence, correctly flagged for review. The
-  second-ranked alternative was `equus_zebra_hartmannae` (zebra) at 43.2%
-  — an interpretable confusion, plausibly driven by both animals sharing
-  a prominent striped coat pattern.
-- **Spotted hyena** (also not a trained class) → confidently (91.2%)
-  misclassified as `giraffa_camelopardalis` (giraffe), and **not** flagged
-  for review, despite being an equally out-of-distribution input.
-
-This is a concrete demonstration of a well-known limitation of softmax-
-based closed-set classifiers: confidence scores are not a reliable
-calibrated measure of "is this actually one of my known classes," only of
-"how sure am I about my top choice among the classes I know." The system
-sometimes expresses appropriate uncertainty on novel inputs and sometimes
-does not. A more robust future iteration could incorporate explicit
-open-set recognition or out-of-distribution detection, rather than relying
-solely on softmax confidence.
+This assists researchers during manual verification.
 
 ---
 
-## 9. RAG Knowledge Base & Retrieval (Week 4)
+# REST API
 
-### 9.1 Overview
-A retrieval-augmented knowledge layer grounds each detection in real
-ecological and conservation facts, sourced from a hand-curated corpus
-rather than free-form model generation. Week 4 covers the knowledge base
-and retrieval mechanism; Week 5 will add an LLM layer that uses this
-retrieved text to generate a natural-language grounded explanation.
+The backend is implemented using **FastAPI** and exposes a REST interface for prediction.
 
-### 9.2 Knowledge Corpus
-Ten markdown documents (`data/knowledge/`), one per trained species, each
-following a consistent structure: Conservation Status (IUCN Red List
-category), Habitat, Behaviour, Diet, Ecological Importance, Major Threats,
-an Interesting Fact, and cited Sources (IUCN Red List, WWF, Smithsonian's
-National Zoo, San Diego Zoo Wildlife Alliance, Animal Diversity Web,
-National Geographic).
+## Base URL
 
-IUCN statuses genuinely vary across the corpus — not a placeholder value
-repeated across documents — which is what makes conservation-status
-reasoning meaningful rather than decorative:
+```
+https://wildlife-cv.onrender.com
+```
 
-| Status | Species |
-|---|---|
-| Critically Endangered | Black rhino |
-| Endangered | Elephant |
-| Vulnerable | Giraffe, Lion, Hartmann's mountain zebra |
-| Near Threatened | Brown hyena |
-| Least Concern | Springbok, Jackal, Gemsbok, Ostrich |
+Interactive API documentation is automatically generated by FastAPI.
 
-### 9.3 Vector Store: ChromaDB
-**Choice rationale:** ChromaDB was selected over FAISS because it provides
-a complete, high-level document-store-and-query API with automatic
-embedding generation (via a bundled `all-MiniLM-L6-v2` sentence-transformer
-model), whereas FAISS is a lower-level similarity-search library requiring
-manual embedding and document management — unnecessary complexity for a
-10-document knowledge base at this scale. A persistent, on-disk client
-(`data/vector_store/`) is used rather than Chroma's in-memory default,
-confirmed via an explicit test (adding a document in one process, querying
-it successfully in a separate later process) to survive across sessions.
+```
+/docs
+```
 
-### 9.4 Retrieval Validation
-Retrieval quality was tested two ways:
+---
 
-**Species-specific semantic queries (10/10 correct):** one natural-language
-query per species (e.g., "What is the conservation status of the black
-rhino?", "How fast can an ostrich run?"), confirming the correct document
-ranks first by embedding distance in every case — verifying retrieval
-works on semantic meaning, not just keyword overlap (queries used varied
-phrasing that often shared few or no exact words with the source document).
+## POST /predict
 
-**A deliberately harder, ambiguous query — a genuine limitation found:**
-the query "Which African animals are threatened by poaching?" — a topic
-explicitly mentioned in both the black rhino and elephant documents —
-failed to return either as a top-3 result; ostrich, brown hyena, and
-jackal ranked higher instead, despite poaching not being a listed threat
-for any of them. This reflects a real weakness of single-chunk-per-document
-embedding for cross-document topic queries, where each document's overall
-semantic content (habitat, diet, behavior) can outweigh a single relevant
-sentence buried in a threats list.
+Uploads an image for wildlife species classification.
 
-**Why this limitation was accepted rather than fixed now:** the production
-retrieval path (Section 9.5) never performs open-ended semantic search —
-it looks up a document by the classifier's exact predicted species ID,
-which cannot suffer from this failure mode. Fixing cross-topic query
-quality (e.g., via finer-grained document chunking) is noted as a future
-improvement rather than implemented now, since it would not affect the
-system's actual behavior as currently used.
+### Request
 
-### 9.5 Integration: Direct ID Lookup, Not Semantic Search
-The `/predict` endpoint's classifier output already provides the exact
-predicted species identity — there is no ambiguity to resolve, unlike a
-free-form user question. Retrieval is therefore implemented as a direct
-ID lookup (`collection.get(ids=[...])`), not a semantic `.query()` call:
-a simpler, faster, and unambiguous operation that is immune to the
-cross-topic weakness described above.
+Multipart form data
 
-`GET /predict` responses now include a `description` field containing the
-full retrieved knowledge document for the predicted species:
+```
+file=image.jpg
+```
+
+---
+
+### Successful Response
+
 ```json
 {
-  "species": "canis_mesomelas",
-  "confidence": 0.9164,
+  "species": "panthera_leo",
+  "confidence": 0.9874,
   "review_needed": false,
-  "description": "# Canis mesomelas\n\n**Common Name:** Black-backed Jackal\n..."
+  "description": "...",
+  "explanation": "..."
 }
 ```
 
-**Design decision — full document, not a trimmed excerpt:** the complete
-document is returned rather than a short summary, since this raw retrieval
-output is intended to feed Week 5's LLM reasoning layer, which requires
-full context (habitat, behavior, threats — not just conservation status)
-to generate a genuinely grounded explanation. Trimming here would remove
-information the generation step needs; a future human-facing summary view
-remains a reasonable addition once generation exists.
-
-**Defensive handling:** retrieval returns `None` (logged as a warning,
-not a silent failure) if a predicted species has no matching document —
-a condition that should never occur given all 10 trained classes have a
-corresponding document, but handled explicitly in case the classifier's
-class list and the knowledge base's document IDs ever fall out of sync.
-
 ---
 
-## 10. Grounded LLM Reasoning Layer (Week 5)
+### Low Confidence Response
 
-### 10.1 Overview 
-Week 4's retrieved documents are passed through a grounded prompt to Gemini (gemini-3.6-flash), generating a natural-language explanation for each detection. The system is explicitly constrained to use only the retrieved document as source material.
-
-### 10.2 Prompt Design
-The prompt explicitly instructs the model to use only the provided source document, to omit rather than guess when the document doesn't cover something, and to acknowledge uncertainty in its framing when review_needed is true rather than stating the classification as settled fact.
-
-### 10.3 Groundedness Testing 
-13 generated explanations were manually reviewed against their source documents, spanning all 10 trained species and multiple conditions: confident predictions, two genuinely low-confidence cases (one manually set, one from a real classifier output on a real jackal image at 0.53 confidence), and a case with a deliberately thin source document. All 13 were fully grounded — zero fabricated claims found. The model consistently shifted to hedged, conditional language ("potential," "should be treated as uncertain," "if confirmed") when confidence was low, and correctly omitted a specific numeric detail (a stated jump height) that a general-knowledge model might otherwise have invented differently. Notably, the low-confidence jackal test's alternative_candidates reproduced the same jackal↔brown hyena confusion pattern identified in Week 2's confusion matrix — a small but genuine sign of consistency across the system's layers.
-
-### 10.4 Latency 
-Generation latency was variable and significant: observed range 10–85 seconds per request (mean ~30s) across testing. An investigation into disabling the SDK's automatic function-calling (AFC) feature — unused in this project — did not meaningfully reduce latency; this appears to be Gemini Flash's typical response time for prompts of this length on the free tier, not a bottleneck introduced by this project's code. Not optimized further: this is a research tool prioritizing complete, grounded output over response speed, not a latency-sensitive production service.
-
-### 10.5 Rate Limiting & Resilience 
-The free tier enforces a hard limit of 20 requests per period for this model. This was hit organically during testing, producing a google.genai.errors.ClientError (code 429). Generation failures are caught explicitly and return None rather than raising, allowing /predict to still return a successful response with classification and retrieval intact — only explanation is nulled. This was verified against a real, naturally-occurring rate-limit failure, not a simulated one. A lightweight counter logs a warning as usage approaches the limit; 
-a production deployment would need a proper request queue or paid tier, 
-judged out of scope here.
-10.6 Testing Strategy — Most tests mock the generation call to 
-avoid consuming free-tier quota on every run; one dedicated integration 
-test exercises the real Gemini API deliberately.
-
-## 11. Known Limitations
-
-- **Jackal remains the weakest class** even after confidence routing;
-  a single global threshold does not fully compensate. A species-specific
-  threshold for jackal is a reasonable future improvement, deliberately
-  not implemented in Week 2 to avoid scope creep.
-- Class weighting was tested and found ineffective at this imbalance
-  ratio — this should not be read as "weighting never helps," only that
-  this specific technique, at this specific imbalance level, did not.
-- ~3,000 raw images were likely undercounted at download time due to
-  filename collisions (Section 2).
-- Confidence scores are uncalibrated softmax outputs, not true
-  probabilities — a small number of confident errors persist.
-- **The classifier has no out-of-distribution detection** — genuinely
-  novel species can produce confidently wrong, unflagged predictions
-  (Section 8.6). This is the most significant limitation surfaced during
-  Week 3 and a strong candidate for future work.
-- The file-size validation reads the full upload into memory before
-  checking its size, rather than inspecting `Content-Length` beforehand —
-  an accepted simplification for a project at this scale, not a
-  production-grade safeguard against memory exhaustion from oversized
-  uploads.
-- **Semantic (query-based) retrieval degrades on cross-document topic
-  questions** (Section 9.4) — accepted as out of scope since production
-  retrieval uses direct ID lookup, not semantic search, but would need
-  addressing (e.g., finer document chunking) before any future feature
-  relies on open-ended knowledge-base search.
-- Generation latency (10-85s, mean ~30s) is significant and unoptimized 
-  acceptable for a research tool, not a production service
-- The free tier's 20-request limit is a real, hard operational constraint; 
-  resilience against it is implemented (graceful degradation) but not circumvented
-- Groundedness testing (13 cases) was thorough but manual, not a large-scale 
-  statistical evaluation — Week 6 will formalize this
-
----
-
-## 12. Project Structure
-
-```
-wildlife-cv-rag/
-├── data/
-│   ├── raw/images/<species>/*.JPG
-│   ├── processed/{train,val,test}/<species>/*.JPG
-│   ├── knowledge/<species>.md              # Week 4: species knowledge corpus
-│   └── vector_store/                        # Week 4: persistent ChromaDB store
-├── notebooks/
-│   └── wildlife_metadata.ipynb
-├── src/
-│   ├── data/
-│   │   ├── download_images.py
-│   │   └── split_dataset.py
-│   ├── models/
-│   │   ├── train.py                    # baseline
-│   │   ├── weighted_sampler.py          # custom WeightedRandomSampler trainer
-│   │   └── train_weighted.py
-│   ├── api/
-│   │   └── app.py                       # Week 3: FastAPI serving; Week 4: RAG-integrated
-│   └── rag/
-│       ├── knowledge_base.py             # Week 4: corpus loading + embedding
-│       └── retrieval.py                  # Week 4: direct ID lookup helper
-├── tests/
-│   └── test_api.py                       # Week 3-4: test suite
-├── eval/
-│   ├── compare_baseline_vs_weighted.py  # Day 13, McNemar's test
-│   ├── confidence_threshold.py           # Day 14, validation-based
-│   ├── test_evaluation.py                # Day 15, test-set (touched once)
-│   ├── model_comparison.csv
-│   ├── baseline_confidence.csv
-│   ├── per_species_threshold_report.csv       (validation)
-│   ├── per_species_threshold_TEST.csv          (test)
-│   └── confidence_distribution.png
-├── models/
-│   ├── baseline_unweighted.pt
-│   └── weighted_sampling.pt
-├── pytest.ini
-├── requirements.txt
-└── README.md
+```json
+{
+  "species": "canis_mesomelas",
+  "confidence": 0.7759,
+  "review_needed": true,
+  "alternative_candidates": [
+    ...
+  ],
+  "description": "...",
+  "explanation": "..."
+}
 ```
 
 ---
 
-## 12. Setup
+### Validation
+
+The API validates:
+
+- supported image types
+- maximum upload size (10 MB)
+- corrupted images
+- unreadable files
+
+Structured error responses are returned for invalid requests.
+
+---
+
+# Frontend
+
+The frontend is built using **React**, **TypeScript**, and **Vite**.
+
+The interface focuses on usability for researchers by providing a clean workflow from image upload to explanation.
+
+## Features
+
+- Drag-and-drop upload
+- Image preview
+- Upload progress indicator
+- Confidence gauge
+- Human review warning
+- Alternative candidate display
+- Species knowledge card
+- AI-generated explanation
+- Responsive layout
+- Sample image selector
+
+---
+
+# Running Locally
+
+## Backend
+
+Clone the repository.
 
 ```bash
-python3 -m venv venv
+git clone https://github.com/FALLINICE/Wildlife-CV.git
+cd Wildlife-CV
+```
+
+Create a virtual environment.
+
+```bash
+python -m venv venv
+```
+
+Activate it.
+
+### Windows
+
+```bash
+venv\Scripts\activate
+```
+
+### macOS / Linux
+
+```bash
 source venv/bin/activate
+```
+
+Install dependencies.
+
+```bash
 pip install -r requirements.txt
 ```
 
-**Run the API:**
-```bash
-uvicorn src.api.app:app --reload --port 8000
-```
-Interactive docs: `http://localhost:8000/docs`
+Create a `.env` file containing:
 
-**Run tests:**
-```bash
-pytest tests/test_api.py -v
+```text
+GEMINI_API_KEY=your_api_key
 ```
 
-**Rebuild the knowledge base** (if `data/knowledge/*.md` files change):
+Run the API.
+
 ```bash
-python src/rag/knowledge_base.py
+uvicorn src.api.app:app --reload
+```
+
+The backend will be available at
+
+```
+http://localhost:8000
 ```
 
 ---
 
-## 13. Roadmap
+## Frontend
 
-- [x] **Week 1** — Data collection, species selection, download pipeline
-- [x] **Day 8** — Train/val/test split (70/15/15, stratified; corruption bug caught and fixed)
-- [x] **Day 9** — YOLO/environment setup, MPS confirmed
-- [x] **Day 10** — Baseline classifier trained (94.8% val accuracy)
-- [x] **Day 11** — Custom weighted-sampling dataloader implemented (hardest technical task in the project)
-- [x] **Day 12** — Weighted classifier trained (94.7% val accuracy)
-- [x] **Day 13** — Baseline vs. weighted comparison, McNemar's test (p=0.635, no significant difference)
-- [x] **Day 14** — Confidence threshold selected (0.85), per-species and overconfidence analysis added
-- [x] **Day 15** — Final test-set evaluation (98.36% trusted accuracy, findings replicated)
-- [x] **Day 16** — Buffer / cleanup
-- [x] **Day 17** — FastAPI endpoint skeleton, model loading via `lifespan`
-- [x] **Day 18** — Confidence + review-flag logic, conditional top-3 alternatives
-- [x] **Day 19** — Full input validation and error handling
-- [x] **Day 20** — Automated test suite (pytest + TestClient)
-- [x] **Day 21** — Logging, endpoint documentation
-- [x] **Day 22** — Final manual pass, README update, out-of-distribution findings documented
-- [x] **Week 4** — Knowledge corpus (10 species), ChromaDB vector store, retrieval validated across all species, integrated into `/predict` via direct ID lookup
-- [x] **Week 5** — Grounded LLM reasoning layer (retrieved text → generated explanation)
-- [ ] **Week 6** — Full evaluation set + retrieval-relevance reporting
-- [ ] **Week 7** — Report-generation agent
-- [ ] **Week 8** — Frontend + deployment
+Navigate to the frontend directory.
+
+```bash
+cd frontend
+```
+
+Install dependencies.
+
+```bash
+npm install
+```
+
+Create a `.env` file.
+
+```text
+VITE_API_URL=http://localhost:8000
+```
+
+Run the development server.
+
+```bash
+npm run dev
+```
+
+The frontend will be available at
+
+```
+http://localhost:5173
+```
+
+---
+
+# Deployment
+
+The application is deployed using **Render**.
+
+## Frontend
+
+Static Site
+
+```
+https://wildlife-cv-1.onrender.com
+```
+
+---
+
+## Backend
+
+FastAPI Web Service
+
+```
+https://wildlife-cv.onrender.com
+```
+
+The frontend communicates with the backend using the `VITE_API_URL` environment variable.
+
+---
+
+
+
+
+
+## Confidence Distribution
+
+/Users/anuj/Documents/Wildlife/eval/confidence_distribution.png
+
+
+
+---
+
+## Example Prediction
+
+**Input**
+
+Camera trap image
+
+↓
+
+**Prediction**
+
+```
+Species:
+Panthera leo
+
+Confidence:
+98.74%
+
+Review Needed:
+No
+```
+
+↓
+
+**Retrieved Knowledge**
+
+```
+Habitat:
+Savannas and grasslands
+
+Conservation Status:
+Vulnerable
+
+Diet:
+Carnivore
+```
+
+↓
+
+**Generated Explanation**
+
+> The uploaded image is classified as a lion with high confidence. Lions are large social carnivores native to sub-Saharan Africa and play a vital role as apex predators. Since the prediction confidence exceeds the review threshold, the classification is considered reliable.
+
+---
+
+# Limitations
+
+Although Wildlife-CV demonstrates strong performance on the selected dataset, several limitations remain.
+
+- The model supports only **10 wildlife species**.
+- Images containing multiple prominent animals are classified as a single species.
+- Performance may decrease on unseen environments or different camera trap deployments.
+- Knowledge retrieval currently relies on one curated document per species.
+- The system assumes English-language knowledge documents.
+- LLM explanations depend on the availability of the Gemini API.
+- The free deployment on Render may experience cold starts after periods of inactivity.
+
+These limitations present opportunities for future improvements.
+
+---
+
+# Future Work
+
+Potential extensions include:
+
+- Support all species available in the Desert Lion Conservation dataset.
+- Multi-label wildlife classification.
+- Object detection and localization.
+- Animal counting within images.
+- Temporal analysis of camera trap sequences.
+- Automatic biodiversity reporting.
+- Interactive conservation dashboards.
+- Hybrid retrieval using multiple ecological sources.
+- Explainable AI visualizations such as Grad-CAM.
+- Offline LLM support for fully self-contained deployments.
+
+---
+
+# Technology Stack
+
+## Machine Learning
+
+- PyTorch
+- Ultralytics YOLO11
+- NumPy
+- Pillow
+
+---
+
+## Retrieval-Augmented Generation
+
+- ChromaDB
+- Sentence Transformers
+- Google Gemini API
+
+---
+
+## Backend
+
+- FastAPI
+- Uvicorn
+- Pydantic
+
+---
+
+## Frontend
+
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+- Axios
+- React Markdown
+
+---
+
+## Deployment
+
+- Render
+- GitHub
+
+---
+
+
+
+# Design Principles
+
+This project was developed with the following goals:
+
+- Accuracy before automation.
+- Transparent confidence reporting.
+- Human-in-the-loop decision making.
+- Grounded AI explanations.
+- Modular architecture.
+- Production-oriented REST API.
+- Reproducible machine learning workflow.
+
+---
+
+# Acknowledgements
+
+This project builds upon several outstanding open-source projects and datasets.
+
+- **LILA BC** for providing the Desert Lion Conservation Camera Trap Dataset.
+- **Ultralytics** for the YOLO11 framework.
+- **Google DeepMind** for the Gemini API.
+- **ChromaDB** for vector similarity search.
+- **Sentence Transformers** for semantic embeddings.
+- **FastAPI** for the backend framework.
+- **React** and **Vite** for the frontend.
+
+---
+
+# License
+
+This project is released under the **MIT License**.
+
+See the `LICENSE` file for details.
+
+---
+
+# Citation
+
+If you use this repository in academic work, please cite it as:
+
+```bibtex
+@software{dengale2026wildlifecv,
+  author = {Anuj Dengale},
+  title = {Wildlife-CV: Camera Trap Wildlife Classification using YOLO11, Retrieval-Augmented Generation, and Gemini},
+  year = {2026},
+  url = {https://github.com/FALLINICE/Wildlife-CV}
+}
+```
+
+---
+
+# Author
+
+**Anuj Dengale**
+
+GitHub: https://github.com/FALLINICE
+
+---
+
+## Star the Repository
+
+If you found this project useful, consider giving it a ⭐ on GitHub.
+
+Contributions, suggestions, and feedback are always welcome.
